@@ -1,0 +1,23 @@
+appId: com.meetmind.app
+productName: MindTree
+# better-sqlite3 is optional (JSON fallback in store.ts). Skipping native
+# rebuild avoids needing Visual Studio and fixes paths with spaces.
+npmRebuild: false
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+asarUnpack:
+  - '**/*.node'
+win:
+  target:
+    - nsis
+mac:
+  target:
+    - dmg
+  category: public.app-category.productivity
+linux:
+  target:
+    - AppImage

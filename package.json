@@ -1,0 +1,46 @@
+{
+  "name": "mindtree",
+  "version": "1.0.0",
+  "description": "MindTree — AI screen-scan exam assistant with vision answers and optional ElevenLabs voice.",
+  "author": "MeetMind",
+  "main": "out/main/index.js",
+  "scripts": {
+    "setup:vad": "node scripts/copy-vad-assets.mjs",
+    "dev": "npm run setup:vad && electron-vite dev",
+    "build": "npm run setup:vad && electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "rebuild": "electron-rebuild -f -w better-sqlite3",
+    "postinstall": "npm run setup:vad && (electron-rebuild -f -w better-sqlite3 || echo \"electron-rebuild skipped — session storage will use JSON fallback\")",
+    "package": "electron-vite build && electron-builder"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.102.0",
+    "@electron-toolkit/utils": "^4.0.0",
+    "@ricky0123/vad-web": "^0.0.30",
+    "better-sqlite3": "^12.10.0",
+    "koffi": "^3.0.2",
+    "onnxruntime-web": "^1.26.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@electron-toolkit/tsconfig": "^2.0.0",
+    "@electron/rebuild": "^4.0.4",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.9.2",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^5.2.0",
+    "autoprefixer": "^10.5.0",
+    "electron": "^42.3.3",
+    "electron-builder": "^26.15.2",
+    "electron-vite": "^5.0.0",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^6.0.3",
+    "vite": "^7.3.5"
+  }
+}
