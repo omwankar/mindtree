@@ -1,6 +1,6 @@
 {
   "name": "mindtree",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "MindTree — AI screen-scan exam assistant with vision answers and optional ElevenLabs voice.",
   "author": "MeetMind",
   "main": "out/main/index.js",

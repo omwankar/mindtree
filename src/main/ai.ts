@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { getAnthropicKey, getGroqKey, getOpenRouterKey } from './settings'
+import { getAnthropicKey, getDeepSeekKey, getGroqKey, getOpenRouterKey } from './settings'
 import {
   isOpenRouterEnabled,
   OPENROUTER_BASE,
@@ -16,18 +16,25 @@ import {
   isGroqChatEnabled
 } from './groq'
 import {
+  DEEPSEEK_CHAT_MODEL,
+  DEEPSEEK_CHAT_URL,
+  deepSeekHeaders,
+  isDeepSeekEnabled
+} from './deepseek'
+import {
   ACTION_ITEM_SYSTEM_PROMPT,
   buildActionItemUserPrompt,
   buildModeUserPrompt,
   systemPromptForMode
 } from '@shared/prompts'
+import { normalizeInterviewAnswer } from '@shared/interviewCue'
 import { loadSettings } from './settings'
 import type { AiProvider, SuggestionRequest } from '@shared/types'
 
-const MODEL = 'claude-sonnet-4-20250514'
+const MODEL = 'claude-sonnet-4-6'
 
 function hasAnyAiKey(): boolean {
-  return Boolean(getOpenRouterKey() || getAnthropicKey() || getGroqKey())
+  return Boolean(getDeepSeekKey())
 }
 
 function anthropicClient(): Anthropic {
@@ -51,9 +58,8 @@ function userPrompt(req: SuggestionRequest): string {
 
 /** Screen answers can be full code solutions — give them more room. */
 function maxTokensFor(req: SuggestionRequest): number {
-  if (req.mode === 'screen' || req.mode === 'review') return 2048
-  if (req.mode === 'meeting' || req.mode === 'custom') return 1024
-  return 512
+  if (req.mode === 'review') return 4096
+  return 2048
 }
 
 function openRouterUserContent(req: SuggestionRequest): unknown {
@@ -82,6 +88,41 @@ function anthropicUserContent(req: SuggestionRequest): Anthropic.MessageParam['c
     },
     { type: 'text', text }
   ]
+}
+
+/** DeepSeek — OpenAI-compatible chat. Text only (no vision). */
+async function streamViaDeepSeek(req: SuggestionRequest, cb: StreamCallbacks): Promise<void> {
+  const mode = req.mode ?? 'assist'
+  const system = systemPromptForMode(mode)
+
+  try {
+    const res = await fetch(DEEPSEEK_CHAT_URL, {
+      method: 'POST',
+      headers: deepSeekHeaders(),
+      body: JSON.stringify({
+        model: DEEPSEEK_CHAT_MODEL,
+        max_tokens: maxTokensFor(req),
+        temperature: 0.3,
+        stream: true,
+        thinking: { type: 'disabled' },
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: userPrompt(req) }
+        ]
+      })
+    })
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '')
+      cb.onError(`DeepSeek error ${res.status}: ${detail.slice(0, 300)}`)
+      return
+    }
+
+    const full = await readChatStream(res.body, cb.onToken)
+    cb.onDone(normalizeInterviewAnswer(full))
+  } catch (err) {
+    cb.onError(`DeepSeek request failed: ${(err as Error).message}`)
+  }
 }
 
 /** Groq — free tier, OpenAI-compatible. Llama 4 Scout handles screenshots. */
@@ -183,7 +224,16 @@ async function streamViaAnthropic(req: SuggestionRequest, cb: StreamCallbacks): 
     const stream = anthropic.messages.stream({
       model: MODEL,
       max_tokens: maxTokensFor(req),
-      system: systemPromptForMode(mode),
+      // Prompt caching: the interview knowledge base (~3k tokens) is identical on
+      // every request — cached reads cost ~10% of normal input tokens, which is
+      // where nearly all the spend goes during the auto-scan loop.
+      system: [
+        {
+          type: 'text',
+          text: systemPromptForMode(mode),
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
       messages: [
         {
           role: 'user',
@@ -204,17 +254,8 @@ async function streamViaAnthropic(req: SuggestionRequest, cb: StreamCallbacks): 
   }
 }
 
-/** Picks the AI backend: explicit setting first, then free providers in auto mode. */
 function resolveAiProvider(): AiProvider | null {
-  const { aiProvider } = loadSettings()
-  if (aiProvider === 'groq') return isGroqChatEnabled() ? 'groq' : null
-  if (aiProvider === 'openrouter') return isOpenRouterEnabled() ? 'openrouter' : null
-  if (aiProvider === 'anthropic') return getAnthropicKey() ? 'anthropic' : null
-
-  if (isGroqChatEnabled()) return 'groq'
-  if (isOpenRouterEnabled()) return 'openrouter'
-  if (getAnthropicKey()) return 'anthropic'
-  return null
+  return isDeepSeekEnabled() ? 'deepseek' : null
 }
 
 /** Streams a meeting suggestion, emitting tokens as they arrive. */
@@ -224,21 +265,11 @@ export async function streamSuggestion(
 ): Promise<void> {
   const provider = resolveAiProvider()
   if (!provider) {
-    cb.onError(
-      'No usable AI key. Add a Groq (free), OpenRouter, or Anthropic key in Settings — ' +
-        'or set AI provider to Auto.'
-    )
+    cb.onError('Add a DeepSeek API key in Settings (platform.deepseek.com) for answers.')
     return
   }
 
-  switch (provider) {
-    case 'groq':
-      return streamViaGroq(req, cb)
-    case 'openrouter':
-      return streamViaOpenRouter(req, cb)
-    default:
-      return streamViaAnthropic(req, cb)
-  }
+  return streamViaDeepSeek(req, cb)
 }
 
 /** Action-item extraction over any OpenAI-compatible endpoint (Groq/OpenRouter). */
@@ -279,45 +310,14 @@ async function extractViaOpenAiCompatible(
 export async function extractActionItems(text: string): Promise<string[]> {
   if (!text.trim() || !hasAnyAiKey()) return []
 
-  const provider = resolveAiProvider()
-  if (provider === 'groq') {
-    return extractViaOpenAiCompatible(GROQ_CHAT_URL, groqHeaders(), GROQ_CHAT_MODEL, text)
-  }
-  if (provider === 'openrouter') {
-    return extractViaOpenAiCompatible(
-      `${OPENROUTER_BASE}/chat/completions`,
-      openRouterHeaders(),
-      OPENROUTER_CHAT_MODEL,
-      text
-    )
-  }
+  if (!resolveAiProvider()) return []
 
-  let anthropic: Anthropic
-  try {
-    anthropic = anthropicClient()
-  } catch {
-    return []
-  }
-
-  try {
-    const msg = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: 400,
-      system: ACTION_ITEM_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: buildActionItemUserPrompt(text) }]
-    })
-
-    const raw = msg.content
-      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-      .map((b) => b.text)
-      .join('')
-      .trim()
-
-    return parseJsonArray(raw)
-  } catch (err) {
-    console.error('[ai] action item extraction failed:', (err as Error).message)
-    return []
-  }
+  return extractViaOpenAiCompatible(
+    DEEPSEEK_CHAT_URL,
+    deepSeekHeaders(),
+    DEEPSEEK_CHAT_MODEL,
+    text
+  )
 }
 
 function parseJsonArray(raw: string): string[] {

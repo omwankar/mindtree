@@ -19,6 +19,22 @@ export function openRouterHeaders(): Record<string, string> {
   }
 }
 
+function tokenFromSseData(data: string): string {
+  if (!data || data === '[DONE]') return ''
+  try {
+    const json = JSON.parse(data) as {
+      choices?: { delta?: { content?: string | null }; message?: { content?: string } }[]
+    }
+    const choice = json.choices?.[0]
+    const delta = choice?.delta?.content
+    if (typeof delta === 'string') return delta
+    const msg = choice?.message?.content
+    return typeof msg === 'string' ? msg : ''
+  } catch {
+    return ''
+  }
+}
+
 /** Parse OpenRouter / OpenAI-style SSE chat completion stream. */
 export async function readChatStream(
   body: ReadableStream<Uint8Array> | null,
@@ -31,6 +47,15 @@ export async function readChatStream(
   let buffer = ''
   let full = ''
 
+  const consumeLine = (line: string): void => {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('data:')) return
+    const token = tokenFromSseData(trimmed.slice(5).trim())
+    if (!token) return
+    full += token
+    onToken(token)
+  }
+
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -38,27 +63,11 @@ export async function readChatStream(
     buffer += decoder.decode(value, { stream: true })
     const lines = buffer.split('\n')
     buffer = lines.pop() ?? ''
-
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed.startsWith('data:')) continue
-      const data = trimmed.slice(5).trim()
-      if (data === '[DONE]') continue
-
-      try {
-        const json = JSON.parse(data) as {
-          choices?: { delta?: { content?: string } }[]
-        }
-        const token = json.choices?.[0]?.delta?.content ?? ''
-        if (token) {
-          full += token
-          onToken(token)
-        }
-      } catch {
-        /* ignore malformed SSE chunks */
-      }
-    }
+    for (const line of lines) consumeLine(line)
   }
+
+  buffer += decoder.decode()
+  if (buffer.trim()) consumeLine(buffer)
 
   return full
 }

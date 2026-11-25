@@ -23,7 +23,20 @@ export function loadSettings(): AppSettings {
     const path = getPath()
     if (existsSync(path)) {
       const parsed = JSON.parse(readFileSync(path, 'utf-8'))
-      loaded = { ...DEFAULT_SETTINGS, ...parsed, screenWatchEnabled: true }
+      loaded = {
+        ...DEFAULT_SETTINGS,
+        ...parsed,
+        sttProvider: 'groq',
+        aiProvider: 'deepseek',
+        // Screen scanning is paused for now — audio-only interview mode.
+        // Re-enable per session via the Settings toggle if needed.
+        screenWatchEnabled: false,
+        // Old saved intervals (5–60s) are too slow for live interviews.
+        screenWatchIntervalSec: Math.max(
+          2,
+          Math.min(4, Number(parsed.screenWatchIntervalSec) || 2)
+        )
+      }
     }
   } catch (err) {
     console.error('[settings] failed to load:', err)
@@ -33,7 +46,12 @@ export function loadSettings(): AppSettings {
 }
 
 export function saveSettings(settings: AppSettings): AppSettings {
-  const merged: AppSettings = { ...DEFAULT_SETTINGS, ...settings }
+  const merged: AppSettings = {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    sttProvider: 'groq',
+    aiProvider: 'deepseek'
+  }
   try {
     writeFileSync(getPath(), JSON.stringify(merged, null, 2), 'utf-8')
     cache = merged
@@ -68,6 +86,6 @@ export function getHuggingfaceKey(): string {
   return key(loadSettings().huggingfaceApiKey, process.env.HUGGINGFACE_API_KEY)
 }
 
-export function getElevenLabsKey(): string {
-  return key(loadSettings().elevenlabsApiKey, process.env.ELEVENLABS_API_KEY)
+export function getDeepSeekKey(): string {
+  return key(loadSettings().deepseekApiKey, process.env.DEEPSEEK_API_KEY)
 }

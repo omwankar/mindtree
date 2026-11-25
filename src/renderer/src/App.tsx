@@ -2,22 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Settings } from './components/Settings'
 import { Toast } from './components/Toast'
 import { MoreMenu } from './components/MoreMenu'
-import { AutoScrollAnswer } from './components/AutoScrollAnswer'
 import { useTranscription } from './hooks/useTranscription'
 import { useAIAnswer } from './hooks/useAIAnswer'
-import { useReadAlongScroll } from './hooks/useReadAlongScroll'
 import { useScreenWatch } from './hooks/useScreenWatch'
-import { useElevenLabsTts } from './hooks/useElevenLabsTts'
-import {
-  EXAM_MCQ_COUNT,
-  EXAM_PROFILE_NAME,
-  EXAM_TOTAL_QUESTIONS
-} from '@shared/examKnowledge'
+import { useMeetingAudio } from './hooks/useMeetingAudio'
+import { looksLikeQuestion } from './lib/meetingQuestions'
+import { MINERVA_PROFILE_NAME } from '@shared/minervaKnowledge'
 import { AppSettings, AssistMode, DEFAULT_SETTINGS } from '@shared/types'
-
-function isCodeAnswer(text: string): boolean {
-  return /```[\s\S]*```/.test(text.trim())
-}
 
 export default function App(): JSX.Element {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
@@ -25,21 +16,18 @@ export default function App(): JSX.Element {
   const [showMore, setShowMore] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
   const [overlayVisible, setOverlayVisible] = useState(true)
-  const [screenWatchOn, setScreenWatchOn] = useState(true)
-  const [ttsOn, setTtsOn] = useState(false)
+  const [screenWatchOn, setScreenWatchOn] = useState(false)
+  const [listenOn, setListenOn] = useState(true)
   const [screenStatus, setScreenStatus] = useState('')
-  const [clickThrough, setClickThrough] = useState(true)
-  const [activeMode, setActiveMode] = useState<AssistMode>('screen')
-  const [answeredCount, setAnsweredCount] = useState(0)
+  // Start clickable — the user can turn on Pass (click-through) mode when needed.
+  const [clickThrough, setClickThrough] = useState(false)
+  const [questionCount, setQuestionCount] = useState(0)
+  const [awaitingNextClick, setAwaitingNextClick] = useState(false)
+  const [input, setInput] = useState('')
   const [toast, setToast] = useState<string | null>(null)
 
   const transcription = useTranscription()
   const ai = useAIAnswer()
-  const tts = useElevenLabsTts(ttsOn)
-  const lastSpokenRef = useRef('')
-  const responseRef = useRef<HTMLDivElement>(null)
-  const scrollAnswers = activeMode !== 'screen' && activeMode !== 'review'
-  useReadAlongScroll(responseRef, ai.answer, ai.streaming, scrollAnswers)
   const toastTimer = useRef<number | null>(null)
 
   const flash = useCallback((msg: string) => {
@@ -49,11 +37,43 @@ export default function App(): JSX.Element {
   }, [])
 
   const resetWatchLockRef = useRef<() => void>(() => {})
+  const aiRef = useRef(ai)
+  aiRef.current = ai
+  const transcriptionRef = useRef(transcription)
+  transcriptionRef.current = transcription
+
+  const awaitingNextClickRef = useRef(false)
+
+  const handleInterviewerSpeech = useCallback(
+    async (audio: Float32Array) => {
+      if (!listenOn) return
+      if (awaitingNextClickRef.current) return
+      const text = await transcriptionRef.current.transcribeSegment(audio, 'Others')
+      if (!text || !looksLikeQuestion(text)) return
+      if (aiRef.current.streaming) return
+      const answer = await aiRef.current.generate(
+        '',
+        transcriptionRef.current.recentInterviewerLines(6),
+        'meeting',
+        text
+      )
+      if (answer.trim() && !/^no[_\s-]?question\.?$/i.test(answer.trim())) {
+        setQuestionCount((n) => n + 1)
+        awaitingNextClickRef.current = true
+        setAwaitingNextClick(true)
+      }
+    },
+    [listenOn]
+  )
+
+  const meetingAudio = useMeetingAudio({
+    onSpeechEnd: handleInterviewerSpeech,
+    autoStart: true
+  })
 
   const run = useCallback(
     async (mode: AssistMode, question?: string) => {
       if (mode === 'screen') {
-        setActiveMode('screen')
         resetWatchLockRef.current()
         const capture = await window.api.captureScreen()
         if (capture.error || !capture.imageBase64) {
@@ -62,41 +82,20 @@ export default function App(): JSX.Element {
         }
         const answer = (await ai.generate('', [], 'screen', undefined, capture.imageBase64)).trim()
         if (/^no[_\s-]?question\.?$/i.test(answer)) {
-          flash('No question detected on screen.')
+          flash('No interview question detected on screen.')
         } else if (answer) {
-          setAnsweredCount((n) => Math.min(EXAM_TOTAL_QUESTIONS, n + 1))
+          setQuestionCount((n) => n + 1)
         }
         return
       }
 
-      if (mode === 'review') {
-        setActiveMode('review')
-        const capture = await window.api.captureScreen()
-        if (capture.error || !capture.imageBase64) {
-          flash(capture.error ?? 'Screen capture failed')
-          return
-        }
-        const review = (await ai.generate('', [], 'review', undefined, capture.imageBase64)).trim()
-        if (/^code[_\s-]?ok\.?$/i.test(review)) {
-          ai.presentAnswer('✓ Your code looks correct — moving to the next question.')
-          flash('Code looks correct ✓')
-        } else if (/^no[_\s-]?code\.?$/i.test(review)) {
-          ai.presentAnswer('No code detected to review.')
-        } else {
-          flash('Found fixes in your code — see corrected version')
-        }
-        return
-      }
-
-      const recent = transcription.recentLines(4)
       if (mode === 'custom' && !question?.trim()) {
-        flash('Paste an MCQ or coding question and press Enter.')
+        flash('Paste or type the interviewer question.')
         return
       }
-      setActiveMode(mode)
-      const answer = await ai.generate('', recent, mode, question)
-      if (mode === 'custom' && answer.trim() && !/^no[_\s-]?question\.?$/i.test(answer.trim())) {
-        setAnsweredCount((n) => Math.min(EXAM_TOTAL_QUESTIONS, n + 1))
+      const answer = await ai.generate('', transcription.recentLines(4), mode, question)
+      if (answer.trim() && !/^no[_\s-]?question\.?$/i.test(answer.trim())) {
+        setQuestionCount((n) => n + 1)
       }
     },
     [ai, transcription, flash]
@@ -106,24 +105,36 @@ export default function App(): JSX.Element {
   runRef.current = run
 
   useEffect(() => {
-    // Pass-through on: clicks/wheel go to apps below unless Ctrl+Shift is held (main process).
     window.api.setClickThrough(clickThrough && overlayVisible)
   }, [clickThrough, overlayVisible])
 
+  const meetingAudioRef = useRef(meetingAudio)
+  meetingAudioRef.current = meetingAudio
+
+  // Ctrl+Shift+Space hides the overlay — stop listening (and screen watch via
+  // `enabled`) while hidden; resume automatically when shown again.
+  useEffect(() => {
+    if (!overlayVisible) {
+      meetingAudioRef.current.pause()
+    } else if (listenOn) {
+      void meetingAudioRef.current.start()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlayVisible])
+
   const scanScreenForAnswer = useCallback(
     async (imageBase64: string): Promise<string> => {
-      setActiveMode('screen')
       return (await ai.generate('', [], 'screen', undefined, imageBase64)).trim()
     },
     [ai]
   )
 
   const handleScreenAnswer = useCallback(() => {
-    setAnsweredCount((n) => Math.min(EXAM_TOTAL_QUESTIONS, n + 1))
+    setQuestionCount((n) => n + 1)
   }, [])
 
   const screenWatch = useScreenWatch({
-    enabled: true,
+    enabled: screenWatchOn && overlayVisible,
     intervalSec: settings.screenWatchIntervalSec,
     aiBusy: ai.streaming,
     onScan: scanScreenForAnswer,
@@ -137,51 +148,58 @@ export default function App(): JSX.Element {
   useEffect(() => {
     window.api.getSettings().then((s) => {
       setSettings(s)
-      setTtsOn(s.ttsEnabled)
-      setScreenWatchOn(true)
+      setScreenWatchOn(s.screenWatchEnabled)
     })
   }, [])
-
-  useEffect(() => {
-    if (!ttsOn || ai.streaming || !ai.answer.trim()) return
-    const text = ai.answer.trim()
-    if (/^no[_\s-]?question\.?$/i.test(text)) return
-    if (lastSpokenRef.current === text) return
-    lastSpokenRef.current = text
-    void tts.speakAnswer(text)
-  }, [ai.answer, ai.streaming, ttsOn, tts.speakAnswer])
 
   const handleClear = useCallback(() => {
     transcription.clear()
     ai.clear()
-    setAnsweredCount(0)
-    lastSpokenRef.current = ''
-    tts.stop()
+    setInput('')
+    setQuestionCount(0)
+    awaitingNextClickRef.current = false
+    setAwaitingNextClick(false)
     screenWatch.resetAnswerLock()
     flash('Session cleared.')
-  }, [transcription, ai, flash, screenWatch.resetAnswerLock, tts])
+  }, [transcription, ai, flash, screenWatch.resetAnswerLock])
 
-  const handleRescan = useCallback(() => {
+  /** Clears the card and arms listening for the next interviewer question. */
+  const handleNextQuestion = useCallback(() => {
+    ai.clear()
     screenWatch.resetAnswerLock()
-    void runRef.current('screen')
-    flash('Force rescan…')
-  }, [screenWatch.resetAnswerLock])
+    awaitingNextClickRef.current = false
+    setAwaitingNextClick(false)
+  }, [ai, screenWatch.resetAnswerLock])
 
   const handleClearRef = useRef(handleClear)
   handleClearRef.current = handleClear
 
+  const handleSend = useCallback(() => {
+    const q = input.trim()
+    if (!q) return
+    run('custom', q)
+    setInput('')
+  }, [input, run])
+
+  const idleLabel = !listenOn
+    ? 'Listening is off — press Listen, or type a question below'
+    : awaitingNextClick
+      ? 'Answer ready — click Next question when they ask the next one'
+      : meetingAudio.listening
+        ? `Listening via ${meetingAudio.captureMode === 'meeting' ? 'tab audio' : 'microphone'} — first question answers automatically`
+        : 'Listening is off — press Listen, or type a question below'
+
   const directAnswerLabel = ai.streaming
-    ? 'Scanning screen…'
+    ? 'Preparing answer…'
     : ai.answer.trim()
       ? null
-      : screenStatus || 'Open a question on screen — answer appears here automatically'
+      : (screenWatchOn ? screenStatus : '') || idleLabel
 
   const handleToggleCollapse = useCallback(() => {
     setCollapsed((c) => !c)
     window.api.toggleExpand()
   }, [])
 
-  // Global hotkeys forwarded from the main process.
   useEffect(() => {
     const offToggle = window.api.onHotkey('toggle', () => {
       setOverlayVisible((v) => {
@@ -191,12 +209,10 @@ export default function App(): JSX.Element {
     })
     const offTrigger = window.api.onHotkey('trigger-ai', () => {
       void runRef.current('screen')
-      flash('Scanning screen…')
     })
     const offScreen = window.api.onHotkey('screen', () => {
       screenWatch.resetAnswerLock()
       void runRef.current('screen')
-      flash('Force rescan…')
     })
     const offClear = window.api.onHotkey('clear', () => handleClearRef.current())
     return () => {
@@ -209,38 +225,37 @@ export default function App(): JSX.Element {
 
   const saveSettings = useCallback(
     async (next: AppSettings) => {
-      const saved = await window.api.saveSettings({
-        ...next,
-        screenWatchEnabled: screenWatchOn,
-        ttsEnabled: ttsOn
-      })
+      const saved = await window.api.saveSettings(next)
       setSettings(saved)
-      setTtsOn(saved.ttsEnabled)
+      setScreenWatchOn(saved.screenWatchEnabled)
       setShowSettings(false)
       flash('Settings saved.')
     },
-    [flash, screenWatchOn, ttsOn]
+    [flash]
   )
 
-
-  const progressLabel = `${answeredCount}/${EXAM_TOTAL_QUESTIONS} answered · ${EXAM_MCQ_COUNT} MCQ + 2 code`
+  const progressLabel = `${questionCount} answered · Vishal · Concentrix Data Engineer`
 
   return (
     <div className={`cluely-wrapper ${overlayVisible ? '' : 'overlay-hidden'}`}>
       <div className="control-bar drag">
-        <div className="logo-btn no-drag" title={EXAM_PROFILE_NAME}>
-          <span className="logo-icon">📝</span>
-          {screenWatch.watching && <span className="logo-pulse" />}
+        <div className="logo-btn no-drag" title={MINERVA_PROFILE_NAME}>
+          <span className="logo-icon">🎯</span>
+          {(screenWatch.watching || meetingAudio.listening) && <span className="logo-pulse" />}
         </div>
 
-        <span className="profile-pill no-drag" title={EXAM_PROFILE_NAME}>
-          {answeredCount}/{EXAM_TOTAL_QUESTIONS}
+        <span className="profile-pill no-drag" title={MINERVA_PROFILE_NAME}>
+          CNX · Data Eng
         </span>
 
-        {(screenWatch.watching || ai.streaming || tts.speaking) && (
+        {(screenWatch.watching || ai.streaming || meetingAudio.listening) && (
           <span className="status-pill no-drag">
             <span className="status-dot" />
-            {ai.streaming ? 'Scanning…' : tts.speaking ? 'Speaking…' : 'Live scan'}
+            {ai.streaming
+              ? 'Answering…'
+              : meetingAudio.speaking
+                ? 'Hearing question…'
+                : `Live (${meetingAudio.captureMode === 'meeting' ? 'tab audio' : 'mic'})`}
           </span>
         )}
 
@@ -261,20 +276,22 @@ export default function App(): JSX.Element {
           <div className="viewed-screen">
             <div className="vs-header">
               <span className="vs-label">{progressLabel}</span>
-              {(screenWatch.watching || ai.streaming) && <span className="vs-badge">live</span>}
+              {(screenWatch.watching || meetingAudio.listening) && (
+                <span className="vs-badge">live</span>
+              )}
             </div>
           </div>
 
-          <div className="response-panel direct-answer" ref={responseRef}>
+          <div className="response-panel direct-answer">
             <div className="response-mode">
-              <span>👁 Screen scan → answer</span>
+              <span>🎯 Concentrix Data Engineer assist</span>
               {!ai.streaming && ai.answer && (
                 <button
                   className="next-q-btn no-drag"
-                  onClick={handleRescan}
-                  title="Rescan now (Ctrl+Shift+S)"
+                  onClick={handleNextQuestion}
+                  title="Clear this answer and wait for the next question"
                 >
-                  Rescan
+                  Next question
                 </button>
               )}
             </div>
@@ -285,11 +302,7 @@ export default function App(): JSX.Element {
                 <>
                   {ai.answer ? (
                     <>
-                      {isCodeAnswer(ai.answer) ? (
-                        <AutoScrollAnswer text={ai.answer} autoScroll={false} />
-                      ) : (
-                        <span className="response-mcq">{ai.answer}</span>
-                      )}
+                      <div className="answer-prose">{ai.answer}</div>
                       <span className="caret">▍</span>
                     </>
                   ) : (
@@ -299,15 +312,30 @@ export default function App(): JSX.Element {
                   )}
                 </>
               ) : ai.answer.trim() ? (
-                isCodeAnswer(ai.answer) ? (
-                  <AutoScrollAnswer text={ai.answer} autoScroll={false} />
-                ) : (
-                  <div className="response-mcq">{ai.answer}</div>
-                )
+                <div className="answer-prose">{ai.answer}</div>
               ) : (
                 <p className={`vs-text ${screenStatus ? '' : 'empty'}`}>{directAnswerLabel}</p>
               )}
             </div>
+          </div>
+
+          <div className={`input-area no-drag compact-input ${input.length > 0 ? 'has-text' : ''}`}>
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault()
+                  run('screen')
+                  return
+                }
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  handleSend()
+                }
+              }}
+              placeholder="Type or paste a question… (Enter to answer, Ctrl+Enter to scan screen)"
+            />
           </div>
 
           <div className="input-footer compact-footer no-drag">
@@ -328,16 +356,19 @@ export default function App(): JSX.Element {
                 />
               </div>
               <button
-                className={`smart-btn ${ttsOn ? 'on' : ''}`}
-                onClick={() => setTtsOn((s) => !s)}
-                title="Speak answers with ElevenLabs (optional)"
+                className={`smart-btn ${meetingAudio.listening ? 'on' : ''}`}
+                onClick={() => {
+                  setListenOn(!meetingAudio.listening)
+                  void meetingAudio.toggle()
+                }}
+                title="Listen to interviewer audio (tab share or mic)"
               >
-                <span className="smart-icon">🔊</span> Voice
+                <span className="smart-icon">🎙</span> Listen
               </button>
               <button
                 className={`smart-btn ${clickThrough ? 'on' : ''}`}
                 onClick={() => setClickThrough((on) => !on)}
-                title="Pass mode ON: hold Ctrl+Shift to interact with overlay"
+                title="Pass mode: hold Ctrl+Shift to interact"
               >
                 <span className="smart-icon">⎋</span> Pass
               </button>
@@ -348,11 +379,13 @@ export default function App(): JSX.Element {
               disabled={ai.streaming}
               title="Scan screen now (Ctrl+Shift+A)"
             >
-              {ai.streaming ? '…' : 'Scan now'}
+              {ai.streaming ? '…' : 'Scan'}
             </button>
           </div>
 
-          {transcription.error && <p className="inline-error">{transcription.error}</p>}
+          {(transcription.error || meetingAudio.error) && (
+            <p className="inline-error">{transcription.error || meetingAudio.error}</p>
+          )}
         </div>
       </div>
 

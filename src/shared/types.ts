@@ -19,8 +19,8 @@ export interface ActionItem {
 /** Speech-to-text backend. "auto" prefers free providers (Groq → Hugging Face) before paid ones. */
 export type SttProvider = 'auto' | 'groq' | 'huggingface' | 'openai' | 'openrouter'
 
-/** AI answer backend. "auto" prefers free Groq, then OpenRouter, then Anthropic. */
-export type AiProvider = 'auto' | 'groq' | 'openrouter' | 'anthropic'
+/** AI answer backend. "auto" prefers DeepSeek, then Anthropic, Groq, OpenRouter. */
+export type AiProvider = 'auto' | 'deepseek' | 'groq' | 'openrouter' | 'anthropic'
 
 export interface AppSettings {
   /** When set, used for Claude via OpenRouter (STT skipped when free STT keys exist). */
@@ -31,6 +31,8 @@ export interface AppSettings {
   groqApiKey: string
   /** Free tier at huggingface.co/settings/tokens — whisper-large-v3. */
   huggingfaceApiKey: string
+  /** DeepSeek chat — https://platform.deepseek.com */
+  deepseekApiKey: string
   /** Which STT API to use. */
   sttProvider: SttProvider
   /** Which AI (chat/vision) API to use for answers. */
@@ -43,12 +45,6 @@ export interface AppSettings {
   screenWatchEnabled: boolean
   /** Seconds between screen captures while watch is on. */
   screenWatchIntervalSec: number
-  /** ElevenLabs API key for text-to-speech. */
-  elevenlabsApiKey: string
-  /** ElevenLabs voice ID (see elevenlabs.io/voice-library). */
-  elevenlabsVoiceId: string
-  /** Speak answers aloud via ElevenLabs when a new answer arrives. */
-  ttsEnabled: boolean
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -57,15 +53,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   anthropicApiKey: '',
   groqApiKey: '',
   huggingfaceApiKey: '',
-  sttProvider: 'auto',
-  aiProvider: 'auto',
+  deepseekApiKey: '',
+  sttProvider: 'groq',
+  aiProvider: 'deepseek',
   language: 'en',
   autoDetectQuestions: false,
-  screenWatchEnabled: true,
-  screenWatchIntervalSec: 2,
-  elevenlabsApiKey: '',
-  elevenlabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
-  ttsEnabled: false
+  screenWatchEnabled: false,
+  screenWatchIntervalSec: 2
 }
 
 /** The Cluely-style assistance modes the user can switch between. */
@@ -122,12 +116,6 @@ export interface TranscribeResult {
   error?: string
 }
 
-export interface SpeakResult {
-  audioBase64: string
-  mimeType: string
-  error?: string
-}
-
 export interface SessionExport {
   transcript: TranscriptSegment[]
   suggestions: string[]
@@ -157,8 +145,7 @@ export const IPC = {
   hotkeyClear: 'hotkey:clear',
   hotkeyExport: 'hotkey:export',
   hotkeyScreen: 'hotkey:screen',
-  captureScreen: 'screen:capture',
-  speakText: 'tts:speak'
+  captureScreen: 'screen:capture'
 } as const
 
 /** Sentinel returned by the vision model when no question is visible. */

@@ -70,6 +70,9 @@ export function useScreenWatch({
   const busyRef = useRef(false)
   /** Fingerprint of the screen we already answered — skip until the page changes. */
   const answeredFpRef = useRef('')
+  /** Fingerprint of the last screen sent to vision — never re-scan an identical
+   *  screen (saves the full image + prompt cost on every static frame). */
+  const scannedFpRef = useRef('')
   const cancelledRef = useRef(false)
   const timerRef = useRef(0)
 
@@ -80,6 +83,7 @@ export function useScreenWatch({
 
   const resetAnswerLock = useCallback(() => {
     answeredFpRef.current = ''
+    scannedFpRef.current = ''
     setStatusMsg('')
   }, [setStatusMsg])
 
@@ -132,6 +136,14 @@ export function useScreenWatch({
           return
         }
 
+        // Screen unchanged since the last vision call (e.g. it returned NO_QUESTION)
+        // — skip the expensive re-scan until something on screen changes.
+        if (scannedFpRef.current && fp === scannedFpRef.current) {
+          schedule(POLL_AFTER_ANSWER_MS)
+          return
+        }
+        scannedFpRef.current = fp
+
         setLastScanAt(Date.now())
         setStatusMsg('Auto-scanning question…')
 
@@ -150,6 +162,8 @@ export function useScreenWatch({
         schedule(POLL_AFTER_ANSWER_MS)
       } catch (err) {
         if (!cancelledRef.current) {
+          // Allow the failed screen to be scanned again on retry.
+          scannedFpRef.current = ''
           onErrorRef.current?.((err as Error).message)
           setStatusMsg('Scan error — retrying…')
           schedule(intervalMs)

@@ -1,60 +1,69 @@
 /**
- * Centralized prompts for MeetMind assessment mode.
+ * Prompts for Concentrix Data Engineer interview mode (Vishal Morey).
  */
 
 import type { AssistMode } from './types'
-import { EXAM_CONTEXT } from './examKnowledge'
+import { clarifyInterviewerQuestion } from './interviewCue'
+import {
+  CANDIDATE_CONTEXT,
+  INTERVIEW_ANSWER_RULES,
+  MINERVA_COMPANY_CONTEXT
+} from './minervaKnowledge'
 
-export const SUGGESTION_SYSTEM_PROMPT = `You are a helpful assistant.`
+const FORMAT_LOCK = `Speak as Vishal Morey. Three prose paragraphs, no headings:
+1) concept + how it works (source and target if relevant)
+2) Mattress Firm / Impetus example + honest gap
+3) why it matters for migration quality
+Never **Definition:** **How it works:** **Example:** **Why it matters:** Never apologize.`
+
+const INTERVIEW_KNOWLEDGE = `${INTERVIEW_ANSWER_RULES}\n\n${FORMAT_LOCK}\n\n${MINERVA_COMPANY_CONTEXT}\n\n${CANDIDATE_CONTEXT}\n\n${FORMAT_LOCK}`
+
+export const SUGGESTION_SYSTEM_PROMPT = INTERVIEW_KNOWLEDGE
 
 export const ACTION_ITEM_SYSTEM_PROMPT = `Return ONLY a JSON array of action-item strings, or [] if none.`
 
-const SCREEN_EXAM_PROMPT = `You read assessment questions from a screenshot. The exam has 22 questions: 20 MCQ (Mathematics + Machine Learning) and 2 DSA coding problems.
+const SCREEN_INTERVIEW_PROMPT = `${INTERVIEW_KNOWLEDGE}
 
-${EXAM_CONTEXT}
+You read interview questions from a screenshot (video call captions, shared doc, coding challenge, chat, or notes).
 
-Detect question type from the screenshot:
+1. Identify the interviewer's question or coding problem on screen.
+2. Answer as Vishal Morey using the knowledge above.
+3. Technical → three spoken paragraphs: concept, project example, why it matters.
+4. Live coding → fenced code first, then two sentences.
+5. If no readable question → exactly: NO_QUESTION
 
-▸ MCQ (multiple choice — options A/B/C/D or 1/2/3/4):
-1. Read the FULL question and EVERY option carefully.
-2. Solve using correct math or ML theory (show work internally; do not output steps).
-3. Reply with ONLY the correct option — e.g. "B" or "C) Gradient descent". Nothing else — no explanation, no preamble.
+Do NOT describe the screenshot.`
 
-▸ CODING (problem statement with constraints, examples, function signature):
-1. Read the full problem, constraints, and required language.
-2. Write a correct, efficient DSA solution.
-3. Reply with ONLY the complete solution in ONE fenced code block. Use the language shown (default Python 3). Match the exact function/class signature on screen.
-4. No explanation before or after the code block.
+const MEETING_INTERVIEW_PROMPT = `${INTERVIEW_KNOWLEDGE}
 
-▸ If the screen shows no clear question, loading page, or is unreadable → exactly: NO_QUESTION
-
-Never describe the screenshot. Output only the MCQ option OR the code block OR NO_QUESTION.`
+The interviewer spoke a question (transcript below). Answer as Vishal Morey in three spoken paragraphs: concept, project, why it matters.`
 
 /** System prompt tuned for each assistance mode. */
 const MODE_SYSTEM_PROMPTS: Record<AssistMode, string> = {
-  assist: SUGGESTION_SYSTEM_PROMPT,
-  meeting: SCREEN_EXAM_PROMPT,
-  say: SUGGESTION_SYSTEM_PROMPT,
-  followup: SUGGESTION_SYSTEM_PROMPT,
-  recap: SUGGESTION_SYSTEM_PROMPT,
-  custom: `${SCREEN_EXAM_PROMPT}
+  assist: INTERVIEW_KNOWLEDGE,
+  meeting: MEETING_INTERVIEW_PROMPT,
+  say: INTERVIEW_KNOWLEDGE,
+  followup: INTERVIEW_KNOWLEDGE,
+  recap: INTERVIEW_KNOWLEDGE,
+  custom: `${INTERVIEW_KNOWLEDGE}
 
-The user pasted question text below instead of a screenshot. Apply the same MCQ or coding rules.`,
-  screen: SCREEN_EXAM_PROMPT,
-  review: `You review code the user typed on screen for a DSA assessment problem.
+The user pasted an interview question. Three spoken paragraphs: concept, project, why it matters.`,
+  screen: SCREEN_INTERVIEW_PROMPT,
+  review: `${INTERVIEW_KNOWLEDGE}
 
+Review code on screen for a technical interview.
 - If correct → exactly: CODE_OK
-- If wrong → COMPLETE corrected code in one fenced block (same language/signature). Minimal "// fix:" on changed lines only.
-- If no code visible → exactly: NO_CODE`
+- If wrong → corrected code in one fenced block + brief fix notes
+- If no code → exactly: NO_CODE`
 }
 
 export function systemPromptForMode(mode: AssistMode = 'assist'): string {
-  return MODE_SYSTEM_PROMPTS[mode] ?? SUGGESTION_SYSTEM_PROMPT
+  return MODE_SYSTEM_PROMPTS[mode] ?? INTERVIEW_KNOWLEDGE
 }
 
 function transcriptBlock(context: string, recentTranscript: string[]): string {
   const transcript = recentTranscript.length
-    ? recentTranscript.join('\n')
+    ? recentTranscript.map((line) => clarifyInterviewerQuestion(line)).join('\n')
     : '(no transcript)'
   if (context.trim()) {
     return `Notes:\n${context.trim()}\n\nTranscript:\n${transcript}`
@@ -63,7 +72,7 @@ function transcriptBlock(context: string, recentTranscript: string[]): string {
 }
 
 export function buildSuggestionUserPrompt(context: string, recentTranscript: string[]): string {
-  return `${transcriptBlock(context, recentTranscript)}\n\nGive helpful talking points.`
+  return `${transcriptBlock(context, recentTranscript)}\n\nThree spoken paragraphs: concept, project example, why it matters. No headings.`
 }
 
 export function buildModeUserPrompt(
@@ -75,19 +84,31 @@ export function buildModeUserPrompt(
   const base = transcriptBlock(context, recentTranscript)
   switch (mode) {
     case 'meeting':
+      return `${base}\n\nQuestion to answer (speech already corrected):\n${clarifyInterviewerQuestion(question?.trim() || extractLastInterviewerLine(recentTranscript) || '') || '(identify from transcript)'}\n\nThree spoken paragraphs: (1) concept and how it works (2) CV project + honest gap (3) why it matters. No headings. Do not mention mishearing.`
     case 'screen':
-      return `Screenshot attached. Read the visible MCQ or coding problem. MCQ → only the correct option letter/text. Coding → only complete solution code in one fenced block. If nothing readable → NO_QUESTION.`
+      return `Screenshot attached. Read the visible interview question. Answer as Vishal Morey in three spoken paragraphs: concept, project, why it matters. If nothing readable → NO_QUESTION.`
     case 'custom':
-      return `Pasted question:\n${question?.trim() || '(empty)'}\n\nMCQ → only correct option. Coding → only complete code in one fenced block.`
+      return `Question to answer:\n${clarifyInterviewerQuestion(question?.trim() || '') || '(empty)'}\n\nThree spoken paragraphs: concept, project, why it matters. No headings. No apology.`
     case 'review':
-      return `Screenshot attached. Review typed code. CODE_OK or corrected code block or NO_CODE.`
+      return `Screenshot attached. Review SQL/Python/PySpark for a data engineering interview. CODE_OK or corrected code or NO_CODE.`
     case 'say':
     case 'followup':
     case 'recap':
     case 'assist':
     default:
-      return `${base}\n\nHelp with the assessment question.`
+      return `${base}\n\nThree spoken paragraphs as Vishal Morey: concept, project, why it matters. No headings.`
   }
+}
+
+function extractLastInterviewerLine(lines: string[]): string {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]
+    if (/^(Interviewer|Others|Meeting):/i.test(line)) {
+      return line.replace(/^(Interviewer|Others|Meeting):\s*/i, '').trim()
+    }
+  }
+  const last = lines[lines.length - 1]
+  return last?.replace(/^(You|Interviewer|Others):\s*/i, '').trim() ?? ''
 }
 
 export function buildActionItemUserPrompt(text: string): string {

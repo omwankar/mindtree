@@ -3,57 +3,53 @@ import { VAD_SAMPLE_RATE, rms } from '@/lib/audioCapture'
 import { downsampleAudio } from '@/lib/speechUtils'
 import type { Speaker } from '@shared/types'
 
-const ENERGY_THRESHOLD = 0.004
-const CHUNK_INTERVAL_MS = 2500
-const MIN_CHUNK_SEC = 1.0
-const RING_BUFFER_SEC = 6
+/** Speech gate: RMS energy above this counts as someone talking. */
+const ENERGY_THRESHOLD = 0.0035
+/** Flush a segment after this much trailing silence — speaker finished the question. */
+const SILENCE_MS = 1100
+/** Ignore blips shorter than this (coughs, clicks). */
+const MIN_SPEECH_MS = 500
+/** Hard cap so a long monologue still flushes and transcribes. */
+const MAX_SPEECH_MS = 20_000
+/** Keep this much audio before speech onset so the first word isn't clipped. */
+const PRE_ROLL_MS = 350
 const PROCESSOR_SIZE = 2048
 
 export type CaptureMode = 'meeting' | 'mic'
 
-interface RingBuffer {
+/** Per-stream utterance segmenter: accumulates while speaking, flushes on silence. */
+interface Segmenter {
   frames: Float32Array[]
-  samples: number
-  peak: number
+  preRoll: Float32Array[]
+  preRollSamples: number
+  speaking: boolean
+  speechStart: number
+  silenceStart: number | null
 }
 
-function emptyRing(): RingBuffer {
-  return { frames: [], samples: 0, peak: 0 }
-}
-
-function pushFrame(ring: RingBuffer, frame: Float32Array, maxSamples: number): void {
-  ring.frames.push(frame)
-  ring.samples += frame.length
-  while (ring.samples > maxSamples && ring.frames.length > 1) {
-    const removed = ring.frames.shift()
-    if (removed) ring.samples -= removed.length
+function newSegmenter(): Segmenter {
+  return {
+    frames: [],
+    preRoll: [],
+    preRollSamples: 0,
+    speaking: false,
+    speechStart: 0,
+    silenceStart: null
   }
 }
 
-function drainRing(ring: RingBuffer, sampleRate: number): Float32Array | null {
-  const chunks = ring.frames
-  ring.frames = []
-  ring.samples = 0
-  if (!chunks.length) return null
-
-  const total = chunks.reduce((n, c) => n + c.length, 0)
-  const minSamples = Math.floor(sampleRate * MIN_CHUNK_SEC)
-  if (total < minSamples) return null
-
-  const merged = new Float32Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    merged.set(chunk, offset)
-    offset += chunk.length
-  }
-  return downsampleAudio(merged, sampleRate, VAD_SAMPLE_RATE)
+function resetSegmenter(s: Segmenter): void {
+  s.frames = []
+  s.preRoll = []
+  s.preRollSamples = 0
+  s.speaking = false
+  s.speechStart = 0
+  s.silenceStart = null
 }
 
 interface UseMeetingAudioOptions {
   onSpeechEnd: (audio: Float32Array, speaker: Speaker) => void
   autoStart?: boolean
-  /** When true, capture meeting/system audio only — no microphone. */
-  interviewerOnly?: boolean
 }
 
 interface UseMeetingAudioResult {
@@ -62,29 +58,32 @@ interface UseMeetingAudioResult {
   level: number
   error: string | null
   loading: boolean
+  /** "meeting" = shared tab/system audio (interviewer only), "mic" = microphone fallback. */
   captureMode: CaptureMode
-  hasMeetingAudio: boolean
   start: () => Promise<void>
   pause: () => void
   toggle: () => Promise<void>
 }
 
+/**
+ * Captures interviewer audio and emits one Float32Array per complete utterance.
+ *
+ * Prefers shared meeting-tab audio (clean interviewer signal); falls back to the
+ * microphone (picks up speaker output) so listening always works. Utterances are
+ * segmented by silence, so full questions reach Whisper in one piece instead of
+ * fixed-interval fragments.
+ */
 export function useMeetingAudio({
   onSpeechEnd,
-  autoStart = true,
-  interviewerOnly = true
+  autoStart = true
 }: UseMeetingAudioOptions): UseMeetingAudioResult {
   const onSpeechEndRef = useRef(onSpeechEnd)
   const streamsRef = useRef<MediaStream[]>([])
   const ctxRef = useRef<AudioContext | null>(null)
   const processorsRef = useRef<ScriptProcessorNode[]>([])
-  const gainsRef = useRef<GainNode[]>([])
-  const intervalRef = useRef<number | null>(null)
-
-  const micRingRef = useRef<RingBuffer>(emptyRing())
-  const meetRingRef = useRef<RingBuffer>(emptyRing())
-  const maxRingSamplesRef = useRef(0)
-  const hasMeetingAudioRef = useRef(false)
+  const nodesRef = useRef<AudioNode[]>([])
+  const segmenterRef = useRef<Segmenter>(newSegmenter())
+  const listeningRef = useRef(false)
 
   const [listening, setListening] = useState(false)
   const [speaking, setSpeaking] = useState(false)
@@ -92,47 +91,33 @@ export function useMeetingAudio({
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [captureMode, setCaptureMode] = useState<CaptureMode>('mic')
-  const [hasMeetingAudio, setHasMeetingAudio] = useState(false)
-  const listeningRef = useRef(false)
-
-  const interviewerOnlyRef = useRef(interviewerOnly)
-  interviewerOnlyRef.current = interviewerOnly
 
   useEffect(() => {
     onSpeechEndRef.current = onSpeechEnd
   }, [onSpeechEnd])
 
-  const flushRing = useCallback((ring: RingBuffer, speaker: Speaker) => {
-    if (ring.peak < ENERGY_THRESHOLD) {
-      ring.peak = 0
-      ring.frames = []
-      ring.samples = 0
-      return
+  const flushSegment = useCallback((seg: Segmenter) => {
+    const chunks = [...seg.preRoll, ...seg.frames]
+    resetSegmenter(seg)
+    if (!chunks.length) return
+
+    const total = chunks.reduce((n, c) => n + c.length, 0)
+    const merged = new Float32Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      merged.set(chunk, offset)
+      offset += chunk.length
     }
-    const pcm = drainRing(ring, ctxRef.current?.sampleRate ?? VAD_SAMPLE_RATE)
-    ring.peak = 0
-    if (!pcm) return
-    onSpeechEndRef.current(pcm, speaker)
+    const sampleRate = ctxRef.current?.sampleRate ?? VAD_SAMPLE_RATE
+    const pcm = downsampleAudio(merged, sampleRate, VAD_SAMPLE_RATE)
+    onSpeechEndRef.current(pcm, 'Others')
   }, [])
 
-  const flushAll = useCallback(() => {
-    if (!interviewerOnlyRef.current) {
-      flushRing(micRingRef.current, 'You')
-    }
-    if (hasMeetingAudioRef.current) {
-      flushRing(meetRingRef.current, 'Others')
-    }
-  }, [flushRing])
-
   const teardown = useCallback(() => {
-    if (intervalRef.current) {
-      window.clearInterval(intervalRef.current)
-      intervalRef.current = null
-    }
     for (const p of processorsRef.current) p.disconnect()
-    for (const g of gainsRef.current) g.disconnect()
+    for (const n of nodesRef.current) n.disconnect()
     processorsRef.current = []
-    gainsRef.current = []
+    nodesRef.current = []
 
     for (const stream of streamsRef.current) {
       stream.getTracks().forEach((t) => t.stop())
@@ -142,8 +127,7 @@ export function useMeetingAudio({
     void ctxRef.current?.close()
     ctxRef.current = null
 
-    micRingRef.current = emptyRing()
-    meetRingRef.current = emptyRing()
+    segmenterRef.current = newSegmenter()
     listeningRef.current = false
     setListening(false)
     setSpeaking(false)
@@ -151,13 +135,10 @@ export function useMeetingAudio({
   }, [])
 
   const wireStream = useCallback(
-    (
-      ctx: AudioContext,
-      stream: MediaStream,
-      ring: RingBuffer,
-      gain: number,
-      onLevel?: (energy: number) => void
-    ): ScriptProcessorNode => {
+    (ctx: AudioContext, stream: MediaStream, gain: number): void => {
+      const seg = segmenterRef.current
+      const preRollFrames = Math.ceil((PRE_ROLL_MS / 1000) * ctx.sampleRate / PROCESSOR_SIZE)
+
       const source = ctx.createMediaStreamSource(stream)
       const preGain = ctx.createGain()
       preGain.gain.value = gain
@@ -172,14 +153,51 @@ export function useMeetingAudio({
         const input = event.inputBuffer.getChannelData(0)
         const frame = new Float32Array(input)
         const energy = rms(frame)
-        ring.peak = Math.max(ring.peak, energy)
-        pushFrame(ring, frame, maxRingSamplesRef.current)
+        const now = Date.now()
 
-        if (onLevel) {
-          const now = performance.now()
-          if (now - lastLevelUpdate > 100) {
-            lastLevelUpdate = now
-            onLevel(energy)
+        const perfNow = performance.now()
+        if (perfNow - lastLevelUpdate > 100) {
+          lastLevelUpdate = perfNow
+          setLevel(energy)
+          setSpeaking(seg.speaking)
+        }
+
+        if (energy > ENERGY_THRESHOLD) {
+          if (!seg.speaking) {
+            seg.speaking = true
+            seg.speechStart = now
+          }
+          seg.silenceStart = null
+          seg.frames.push(frame)
+
+          if (now - seg.speechStart >= MAX_SPEECH_MS) {
+            flushSegment(seg)
+          }
+          return
+        }
+
+        if (!seg.speaking) {
+          // Rolling pre-roll so speech onset isn't clipped.
+          seg.preRoll.push(frame)
+          seg.preRollSamples += frame.length
+          while (seg.preRoll.length > preRollFrames) {
+            const removed = seg.preRoll.shift()
+            if (removed) seg.preRollSamples -= removed.length
+          }
+          return
+        }
+
+        // Trailing silence inside an utterance.
+        seg.frames.push(frame)
+        if (seg.silenceStart === null) seg.silenceStart = now
+
+        const silenceDur = now - seg.silenceStart
+        const speechDur = now - seg.speechStart
+        if (silenceDur >= SILENCE_MS) {
+          if (speechDur >= MIN_SPEECH_MS + SILENCE_MS) {
+            flushSegment(seg)
+          } else {
+            resetSegmenter(seg)
           }
         }
       }
@@ -188,17 +206,23 @@ export function useMeetingAudio({
       processor.connect(silent)
       silent.connect(ctx.destination)
 
-      gainsRef.current.push(silent)
+      nodesRef.current.push(source, preGain, silent)
       processorsRef.current.push(processor)
-      return processor
     },
-    []
+    [flushSegment]
   )
 
   const acquireMeetingStream = useCallback(async (): Promise<MediaStream | null> => {
     try {
+      // getDisplayMedia demands a video track even though we only want audio.
+      // Keep it small but valid — 1×1 makes Chromium's frame pool log
+      // "Failed to create a video frame" errors. The track is stopped below.
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { width: { ideal: 1, max: 1 }, height: { ideal: 1, max: 1 }, frameRate: { ideal: 1, max: 1 } },
+        video: {
+          width: { ideal: 320, max: 320 },
+          height: { ideal: 180, max: 180 },
+          frameRate: { ideal: 1, max: 5 }
+        },
         audio: true
       })
       stream.getVideoTracks().forEach((t) => t.stop())
@@ -209,20 +233,25 @@ export function useMeetingAudio({
       }
       return new MediaStream(audioTracks)
     } catch (err) {
-      console.warn('[meeting-audio] system loopback unavailable:', err)
+      console.warn('[meeting-audio] tab/system audio unavailable:', err)
       return null
     }
   }, [])
 
-  const acquireMicStream = useCallback(async (): Promise<MediaStream> => {
-    return navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        autoGainControl: true,
-        noiseSuppression: true
-      }
-    })
+  const acquireMicStream = useCallback(async (): Promise<MediaStream | null> => {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: false, // keep speaker audio audible to the mic
+          autoGainControl: true,
+          noiseSuppression: true
+        }
+      })
+    } catch (err) {
+      console.warn('[meeting-audio] microphone unavailable:', err)
+      return null
+    }
   }, [])
 
   const start = useCallback(async () => {
@@ -231,100 +260,52 @@ export function useMeetingAudio({
     setError(null)
 
     try {
+      // Preferred: shared meeting-tab audio (clean interviewer-only signal).
       const meetingStream = await acquireMeetingStream()
+      // Fallback: microphone hears the interviewer through your speakers.
+      const stream = meetingStream ?? (await acquireMicStream())
 
-      if (interviewerOnlyRef.current) {
-        const meetingOk = Boolean(meetingStream?.getAudioTracks().length)
-        if (!meetingOk) {
-          setError(
-            'Share your interview tab/window with audio checked — mic is off; we only listen to the interviewer.'
-          )
-          teardown()
-          return
-        }
-        hasMeetingAudioRef.current = true
-        setHasMeetingAudio(true)
-        setCaptureMode('meeting')
-        streamsRef.current = [meetingStream!]
-
-        const ctx = new AudioContext()
-        if (ctx.state === 'suspended') await ctx.resume()
-        ctxRef.current = ctx
-        maxRingSamplesRef.current = Math.floor(ctx.sampleRate * RING_BUFFER_SEC)
-        meetRingRef.current = emptyRing()
-
-        wireStream(ctx, meetingStream!, meetRingRef.current, 1.3, (energy) => {
-          setLevel(Math.round(energy * 50) / 50)
-          setSpeaking(energy > ENERGY_THRESHOLD)
-        })
-
-        intervalRef.current = window.setInterval(flushAll, CHUNK_INTERVAL_MS)
-        listeningRef.current = true
-        setListening(true)
+      if (!stream) {
+        setError(
+          'No audio source. Share your meeting tab with "Share audio" checked, or allow microphone access.'
+        )
+        teardown()
         return
       }
 
-      const micStream = await acquireMicStream()
-
-      const meetingOk = Boolean(meetingStream?.getAudioTracks().length)
-      hasMeetingAudioRef.current = meetingOk
-      setHasMeetingAudio(meetingOk)
-      setCaptureMode(meetingOk ? 'meeting' : 'mic')
-
-      const streams: MediaStream[] = [micStream]
-      if (meetingStream) streams.push(meetingStream)
-      streamsRef.current = streams
+      const mode: CaptureMode = meetingStream ? 'meeting' : 'mic'
+      setCaptureMode(mode)
+      streamsRef.current = [stream]
 
       const ctx = new AudioContext()
       if (ctx.state === 'suspended') await ctx.resume()
       ctxRef.current = ctx
-      maxRingSamplesRef.current = Math.floor(ctx.sampleRate * RING_BUFFER_SEC)
+      segmenterRef.current = newSegmenter()
 
-      micRingRef.current = emptyRing()
-      meetRingRef.current = emptyRing()
-
-      wireStream(ctx, micStream, micRingRef.current, 1, (energy) => {
-        setLevel(Math.round(energy * 50) / 50)
-        setSpeaking(energy > ENERGY_THRESHOLD)
-      })
-
-      if (meetingStream) {
-        wireStream(ctx, meetingStream, meetRingRef.current, 1.3)
-      }
-
-      intervalRef.current = window.setInterval(flushAll, CHUNK_INTERVAL_MS)
+      wireStream(ctx, stream, mode === 'meeting' ? 1.3 : 1.6)
 
       listeningRef.current = true
       setListening(true)
 
-      if (!meetingOk) {
+      if (mode === 'mic') {
         setError(
-          'Meeting audio unavailable — mic only. Allow screen/audio capture when prompted for full interview listening.'
+          'Using microphone (hears interviewer via speakers). For cleaner audio, share the meeting tab with "Share audio".'
         )
       }
     } catch (err) {
       const msg = (err as Error).message ?? String(err)
-      if (/denied|not allowed|permission/i.test(msg)) {
-        setError(
-          interviewerOnlyRef.current
-            ? 'Screen/audio share denied. Pick your interview tab and check "Share audio".'
-            : 'Audio access denied. Allow Microphone + Screen capture in Windows Settings → Privacy.'
-        )
-      } else if (/not found|no device/i.test(msg)) {
-        setError('No microphone found. Plug in a mic and try again.')
-      } else {
-        setError(`Could not start audio capture: ${msg}`)
-      }
+      setError(`Could not start audio capture: ${msg}`)
       teardown()
     } finally {
       setLoading(false)
     }
-  }, [acquireMeetingStream, acquireMicStream, flushAll, teardown, wireStream])
+  }, [acquireMeetingStream, acquireMicStream, teardown, wireStream])
 
   const pause = useCallback(() => {
-    flushAll()
+    const seg = segmenterRef.current
+    if (seg.speaking && seg.frames.length) flushSegment(seg)
     teardown()
-  }, [flushAll, teardown])
+  }, [flushSegment, teardown])
 
   const toggle = useCallback(async () => {
     if (listeningRef.current) pause()
@@ -347,7 +328,6 @@ export function useMeetingAudio({
     error,
     loading,
     captureMode,
-    hasMeetingAudio,
     start,
     pause,
     toggle

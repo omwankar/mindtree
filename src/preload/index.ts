@@ -8,7 +8,6 @@ import {
   SuggestionRequest,
   SuggestionTokenEvent,
   ScreenCaptureResult,
-  SpeakResult,
   TranscribeResult
 } from '@shared/types'
 
@@ -19,10 +18,6 @@ const api = {
 
   captureScreen(): Promise<ScreenCaptureResult> {
     return ipcRenderer.invoke(IPC.captureScreen)
-  },
-
-  speakText(text: string): Promise<SpeakResult> {
-    return ipcRenderer.invoke(IPC.speakText, text)
   },
 
   startSuggestion(req: SuggestionRequest): void {

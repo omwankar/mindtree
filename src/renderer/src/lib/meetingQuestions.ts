@@ -1,6 +1,6 @@
-import { RESUME_TOPIC_KEYWORDS } from '@shared/resumeKnowledge'
+import { MINERVA_TOPIC_KEYWORDS } from '@shared/minervaKnowledge'
 
-/** Detect whether transcribed speech contains a question. */
+/** Detect whether transcribed speech contains an interview question. */
 export function looksLikeQuestion(text: string): boolean {
   const t = text.trim().toLowerCase()
   if (t.length < 4) return false
@@ -13,13 +13,20 @@ export function looksLikeQuestion(text: string): boolean {
     return true
   }
   if (
-    /\b(what do you think|can you|could you|would you|do you know|any idea|how do you|what is|what are|walk me through|help me understand|tell me about|describe a time|give me an example|have you ever|why did you|why should we|why transition|why move|why join|why leave|tell us about yourself|about your experience|about your background|about your role|about the project|about champagne|about dehaat|about mrfr|about clear edge|market sizing|go to market|gtm|benchmark|swot|porter|pestle|value chain|power bi|capital iq|factiva|prompt engineering|star method|supply chain|market entry|thought leadership|client management|data triangulation|so what|roi|research project|competitive landscape|market intelligence)\b/.test(
+    /\b(tell me about yourself|walk me through|help me understand|tell me about|describe a time|give me an example|have you ever|why did you|why should we|why this role|why join|why concentrix|about your experience|about your background|about your project|how would you|what is your experience|star method|data migration|etl|elt|azure data factory|databricks|dataverse|dynamics|py spark|pipeline)\b/.test(
       t
     )
   ) {
     return true
   }
-  return RESUME_TOPIC_KEYWORDS.some((kw) => t.includes(kw))
+  if (
+    /\b(let's say|lets say|suppose|imagine|legacy crm|cutover|incremental load|full load|reconcile|source to target|how would you migrate|how would you handle)\b/.test(
+      t
+    )
+  ) {
+    return true
+  }
+  return MINERVA_TOPIC_KEYWORDS.some((kw) => t.includes(kw))
 }
 
 /** Pull the latest question-like line from formatted transcript rows. */

@@ -17,7 +17,6 @@ import {
 } from './clickThrough'
 import { transcribeAudio } from './whisper'
 import { capturePrimaryScreen } from './screenCapture'
-import { synthesizeSpeech } from './elevenlabs'
 import { extractActionItems, streamSuggestion } from './ai'
 import { loadSettings, saveSettings } from './settings'
 import { exportMarkdown, saveSession } from './store'
@@ -90,8 +89,6 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.captureScreen, async () => capturePrimaryScreen())
 
-  ipcMain.handle(IPC.speakText, async (_e, text: string) => synthesizeSpeech(text))
-
   ipcMain.on(IPC.suggestionStart, (event, req: SuggestionRequest) => {
     const sender = event.sender
     void streamSuggestion(req, {
@@ -132,17 +129,30 @@ function registerIpc(): void {
   })
 }
 
-app.whenReady().then(async () => {
-  app.setName('MeetMind')
-  await setupAudioCapture()
-  registerIpc()
-  createWindow()
-  registerHotkeys(getWindow)
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
   })
-})
+
+  app.whenReady().then(async () => {
+    app.setName('MeetMind')
+    await setupAudioCapture()
+    registerIpc()
+    createWindow()
+    registerHotkeys(getWindow)
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
+  })
+}
 
 app.on('will-quit', () => {
   stopModifierClickThrough()

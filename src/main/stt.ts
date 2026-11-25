@@ -11,38 +11,13 @@ const GROQ_WHISPER_URL = 'https://api.groq.com/openai/v1/audio/transcriptions'
 /** Turbo is ~2x faster on Groq with similar accuracy for meeting speech. */
 const GROQ_WHISPER_MODEL = 'whisper-large-v3-turbo'
 const GROQ_STT_PROMPT =
-  'Online assessment. Mathematics, machine learning, multiple choice, data structures, algorithms, coding interview, English.'
+  'Data engineering job interview at Concentrix. Azure Data Factory, ADF, ADLS, Data Lake, Databricks, PySpark, Delta Lake, Microsoft Fabric, Dynamics 365, Dataverse, Power Platform, ETL, ELT, SQL, Python, REST API, Elasticsearch, Azure AI Search, Synapse, Event Hubs, data migration, reconciliation, English.'
 const OPENAI_WHISPER_URL = 'https://api.openai.com/v1/audio/transcriptions'
 const HF_WHISPER_URL =
   'https://api-inference.huggingface.co/models/openai/whisper-large-v3'
 
 export function resolveSttProvider(): SttProvider | null {
-  const { sttProvider } = loadSettings()
-  if (sttProvider !== 'auto') {
-    return hasKeyFor(sttProvider) ? sttProvider : null
-  }
-  if (getGroqKey()) return 'groq'
-  if (getHuggingfaceKey()) return 'huggingface'
-  if (getOpenAIKey()) return 'openai'
-  if (getOpenRouterKey()) return 'openrouter'
-  return null
-}
-
-function hasKeyFor(provider: SttProvider): boolean {
-  switch (provider) {
-    case 'groq':
-      return Boolean(getGroqKey())
-    case 'huggingface':
-      return Boolean(getHuggingfaceKey())
-    case 'openai':
-      return Boolean(getOpenAIKey())
-    case 'openrouter':
-      return Boolean(getOpenRouterKey())
-    case 'auto':
-      return Boolean(resolveSttProvider())
-    default:
-      return false
-  }
+  return getGroqKey() ? 'groq' : null
 }
 
 function whisperForm(audio: ArrayBuffer, model: string, withPrompt = false): FormData {
@@ -163,8 +138,5 @@ export function sttProviderLabel(provider: SttProvider): string {
 }
 
 export function missingSttKeyMessage(): string {
-  return (
-    'No STT API key configured. For free testing, add a Groq key (console.groq.com) ' +
-    'or Hugging Face token (huggingface.co/settings/tokens) in Settings.'
-  )
+  return 'Add a Groq API key in Settings (console.groq.com) for speech-to-text.'
 }

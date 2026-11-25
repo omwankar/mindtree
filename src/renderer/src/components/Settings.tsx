@@ -1,20 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { AiProvider, AppSettings, SttProvider } from '@shared/types'
-
-const STT_PROVIDERS: { value: SttProvider; label: string }[] = [
-  { value: 'auto', label: 'Auto (Groq → Hugging Face → OpenAI → OpenRouter)' },
-  { value: 'groq', label: 'Groq — free Whisper' },
-  { value: 'huggingface', label: 'Hugging Face — free Whisper' },
-  { value: 'openai', label: 'OpenAI Whisper (paid)' },
-  { value: 'openrouter', label: 'OpenRouter audio (needs $0.50+ balance)' }
-]
-
-const AI_PROVIDERS: { value: AiProvider; label: string }[] = [
-  { value: 'auto', label: 'Auto (Groq free → OpenRouter → Anthropic)' },
-  { value: 'groq', label: 'Groq — Llama 4 Scout (free, vision)' },
-  { value: 'openrouter', label: 'OpenRouter — Claude / Gemini' },
-  { value: 'anthropic', label: 'Anthropic — Claude direct' }
-]
+import type { AppSettings } from '@shared/types'
 
 interface SettingsProps {
   open: boolean
@@ -61,42 +46,11 @@ export function Settings({ open, initial, onClose, onSave }: SettingsProps): JSX
       </div>
 
       <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4 text-[12px]">
-        <Field label="Speech-to-text provider">
-          <select
-            value={form.sttProvider}
-            onChange={(e) => update('sttProvider', e.target.value as SttProvider)}
-            className="w-full rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-white outline-none focus:border-accent"
-          >
-            {STT_PROVIDERS.map((p) => (
-              <option key={p.value} value={p.value} className="bg-zinc-900">
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <p className="text-[11px] text-white/40 -mt-2">
-          For free testing, use Groq or Hugging Face below. OpenRouter audio requires paid balance.
+        <p className="text-[11px] text-white/40">
+          Voice uses Groq Whisper. Answers use DeepSeek. That is the only pairing.
         </p>
 
-        <Field label="AI answers provider (chat + screen vision)">
-          <select
-            value={form.aiProvider}
-            onChange={(e) => update('aiProvider', e.target.value as AiProvider)}
-            className="w-full rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-white outline-none focus:border-accent"
-          >
-            {AI_PROVIDERS.map((p) => (
-              <option key={p.value} value={p.value} className="bg-zinc-900">
-                {p.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <p className="text-[11px] text-white/40 -mt-2">
-          Groq is free and answers screen questions with Llama 4 Scout vision — one key covers both
-          speech and AI answers.
-        </p>
-
-        <Field label="Groq API key (free STT — recommended for testing)">
+        <Field label="Groq API key (speech-to-text)">
           <input
             type="password"
             value={form.groqApiKey}
@@ -106,92 +60,20 @@ export function Settings({ open, initial, onClose, onSave }: SettingsProps): JSX
           />
         </Field>
         <p className="text-[11px] text-white/40 -mt-2">
-          Free at console.groq.com — Whisper large v3, generous free tier.
+          Free at console.groq.com — transcribes the interviewer.
         </p>
 
-        <Field label="Hugging Face token (free STT alternative)">
+        <Field label="DeepSeek API key (LLM answers)">
           <input
             type="password"
-            value={form.huggingfaceApiKey}
-            onChange={(e) => update('huggingfaceApiKey', e.target.value)}
-            placeholder="hf_…"
-            className="w-full rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-white outline-none focus:border-accent"
-          />
-        </Field>
-        <p className="text-[11px] text-white/40 -mt-2">
-          Free at huggingface.co/settings/tokens — rate-limited whisper-large-v3.
-        </p>
-
-        <Field label="OpenRouter API key (Claude chat — optional)">
-          <input
-            type="password"
-            value={form.openRouterApiKey}
-            onChange={(e) => update('openRouterApiKey', e.target.value)}
-            placeholder="sk-or-v1-…"
-            className="w-full rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-white outline-none focus:border-accent"
-          />
-        </Field>
-        <p className="text-[11px] text-white/40 -mt-2">
-          Used for AI Assist when set. Not used for speech if Groq/HF keys exist.
-        </p>
-
-        <Field label="OpenAI API key (Whisper fallback)">
-          <input
-            type="password"
-            value={form.openaiApiKey}
-            onChange={(e) => update('openaiApiKey', e.target.value)}
+            value={form.deepseekApiKey}
+            onChange={(e) => update('deepseekApiKey', e.target.value)}
             placeholder="sk-…"
             className="w-full rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-white outline-none focus:border-accent"
           />
         </Field>
-
-        <Field label="Anthropic API key (Claude)">
-          <input
-            type="password"
-            value={form.anthropicApiKey}
-            onChange={(e) => update('anthropicApiKey', e.target.value)}
-            placeholder="sk-ant-…"
-            className="w-full rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-white outline-none focus:border-accent"
-          />
-        </Field>
-
-        <Field label="ElevenLabs API key (text-to-speech)">
-          <input
-            type="password"
-            value={form.elevenlabsApiKey}
-            onChange={(e) => update('elevenlabsApiKey', e.target.value)}
-            placeholder="sk_…"
-            className="w-full rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-white outline-none focus:border-accent"
-          />
-        </Field>
         <p className="text-[11px] text-white/40 -mt-2">
-          Free tier at elevenlabs.io — speaks MCQ answers aloud (e.g. &quot;The answer is B&quot;).
-        </p>
-
-        <Field label="ElevenLabs voice ID">
-          <input
-            type="text"
-            value={form.elevenlabsVoiceId}
-            onChange={(e) => update('elevenlabsVoiceId', e.target.value)}
-            placeholder="21m00Tcm4TlvDq8ikWAM"
-            className="w-full rounded-md bg-black/40 border border-white/15 px-2 py-1.5 text-white outline-none focus:border-accent"
-          />
-        </Field>
-        <p className="text-[11px] text-white/40 -mt-2">
-          Default is Rachel. Pick another voice ID from your ElevenLabs voice library.
-        </p>
-
-        <label className="flex items-center justify-between cursor-pointer">
-          <span className="text-white/80">Auto-speak answers (ElevenLabs)</span>
-          <input
-            type="checkbox"
-            checked={form.ttsEnabled}
-            onChange={(e) => update('ttsEnabled', e.target.checked)}
-            className="accent-emerald-400 w-4 h-4"
-          />
-        </label>
-        <p className="text-[11px] text-white/40 -mt-2">
-          When on, each new answer is read aloud. Toggle Voice in the main panel anytime.
+          From platform.deepseek.com — writes the spoken answer.
         </p>
 
         <Field label="Transcription language">
@@ -248,8 +130,7 @@ export function Settings({ open, initial, onClose, onSave }: SettingsProps): JSX
         </p>
 
         <p className="text-[11px] text-white/40">
-          Keys are stored locally in this app&apos;s data folder and never leave your machine except
-          to call the configured API provider.
+          Keys stay on this machine except when calling Groq or DeepSeek.
         </p>
 
         <div className="space-y-2 pt-1">
@@ -287,7 +168,13 @@ export function Settings({ open, initial, onClose, onSave }: SettingsProps): JSX
           Cancel
         </button>
         <button
-          onClick={() => onSave(form)}
+          onClick={() =>
+            onSave({
+              ...form,
+              sttProvider: 'groq',
+              aiProvider: 'deepseek'
+            })
+          }
           className="flex-1 py-1.5 rounded-md bg-accent/90 hover:bg-accent text-black font-medium text-[12px]"
         >
           Save

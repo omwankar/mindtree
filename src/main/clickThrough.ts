@@ -32,7 +32,7 @@ function ctrlShiftHeldNative(): boolean {
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let targetWin: BrowserWindow | null = null
-let passThroughEnabled = true
+let passThroughEnabled = false
 let interacting = false
 
 function applyMouseIgnore(win: BrowserWindow, ignore: boolean): void {
@@ -85,9 +85,10 @@ export function setPassThroughEnabled(win: BrowserWindow | null, enabled: boolea
 export function startModifierClickThrough(win: BrowserWindow): void {
   stopModifierClickThrough()
   targetWin = win
-  passThroughEnabled = true
+  // Start clickable — the renderer enables pass-through via the Pass button.
+  passThroughEnabled = false
   interacting = false
-  applyMouseIgnore(win, true)
+  applyMouseIgnore(win, false)
 
   pollTimer = setInterval(syncFromModifiers, POLL_MS)
 }
